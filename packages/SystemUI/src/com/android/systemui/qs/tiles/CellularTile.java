@@ -37,6 +37,7 @@ import com.android.systemui.statusbar.policy.NetworkController.MobileDataControl
 import com.android.systemui.statusbar.policy.NetworkController.MobileDataController.DataUsageInfo;
 import com.android.systemui.statusbar.policy.NetworkController.SignalCallback;
 import com.android.systemui.statusbar.policy.SignalCallbackAdapter;
+import cyanogenmod.app.StatusBarPanelCustomTile;
 
 /** Quick settings tile: Cellular **/
 public class CellularTile extends QSTile<QSTile.SignalState> {
@@ -102,6 +103,11 @@ public class CellularTile extends QSTile<QSTile.SignalState> {
     }
 
     @Override
+    protected void handleSecondaryClick() {
+        handleClick();
+    }
+
+    @Override
     protected void handleLongClick() {
         if (mTelephonyManager.getDefault().getPhoneCount() > 1) {
             mHost.startActivityDismissingKeyguard(MOBILE_NETWORK_SETTINGS_MSIM);
@@ -153,6 +159,11 @@ public class CellularTile extends QSTile<QSTile.SignalState> {
         return MetricsLogger.QS_CELLULAR;
     }
 
+    @Override
+    public boolean hasDualTargetsDetails() {
+        return true;
+    }
+
     // Remove the period from the network name
     public static String removeTrailingPeriod(String string) {
         if (string == null) return null;
@@ -189,9 +200,8 @@ public class CellularTile extends QSTile<QSTile.SignalState> {
 
         @Override
         public void setMobileDataIndicators(IconState statusIcon, IconState qsIcon, int statusType,
-                int qsType, boolean activityIn, boolean activityOut, int dataActivityId,
-                int mobileActivityId, int stackedDataIcon, int stackedVoiceIcon,
-                String typeContentDescription, String description, boolean isWide, int subId) {
+                int qsType, boolean activityIn, boolean activityOut, String typeContentDescription,
+                String description, boolean isWide, int subId) {
             if (qsIcon == null) {
                 // Not data sim, don't display.
                 return;
@@ -237,6 +247,10 @@ public class CellularTile extends QSTile<QSTile.SignalState> {
     };
 
     private final class CellularDetailAdapter implements DetailAdapter {
+        @Override
+        public StatusBarPanelCustomTile getCustomTile() {
+            return null;
+        }
 
         @Override
         public int getTitle() {

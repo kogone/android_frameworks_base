@@ -1798,13 +1798,16 @@ public class PackageManagerService extends IPackageManager.Stub {
             return;
         }
 
-        PermissionsState permissionsState = sb.getPermissionsState();
-
-        for (String permission : pkg.requestedPermissions) {
-            BasePermission bp = mSettings.mPermissions.get(permission);
-            if (bp != null && bp.isRuntime() && (grantedPermissions == null
-                    || ArrayUtils.contains(grantedPermissions, permission))) {
-                permissionsState.grantRuntimePermission(bp, userId);
+        synchronized (mPackages) {
+            for (String permission : pkg.requestedPermissions) {
+                BasePermission bp = mSettings.mPermissions.get(permission);
+                if (bp != null && (bp.isRuntime() || bp.isDevelopment())
+                        && (grantedPermissions == null
+                               || ArrayUtils.contains(grantedPermissions, permission))
+                        && (getPermissionFlags(permission, pkg.packageName, userId)
+                                & PackageManager.FLAG_PERMISSION_SYSTEM_FIXED) == 0) {
+                    grantRuntimePermission(pkg.packageName, permission, userId);
+                }
             }
         }
     }
@@ -2136,7 +2139,8 @@ public class PackageManagerService extends IPackageManager.Stub {
             }
 
             final VersionInfo ver = mSettings.getInternalVersion();
-            mIsUpgrade = !Build.FINGERPRINT.equals(ver.fingerprint);
+            mIsUpgrade = !Build.FINGERPRINT.equals(ver.fingerprint) ||
+                    !Build.DISPLAY.equals(ver.displayversion);
             // when upgrading from pre-M, promote system app permissions from install to runtime
             mPromoteSystemApps =
                     mIsUpgrade && ver.sdkVersion <= Build.VERSION_CODES.LOLLIPOP_MR1;
@@ -2388,7 +2392,7 @@ public class PackageManagerService extends IPackageManager.Stub {
                         + mSdkVersion + "; regranting permissions for internal storage");
                 updateFlags |= UPDATE_PERMISSIONS_REPLACE_PKG | UPDATE_PERMISSIONS_REPLACE_ALL;
             }
-            updatePermissionsLPw(null, null, updateFlags);
+            updatePermissionsLPw(null, null, StorageManager.UUID_PRIVATE_INTERNAL, updateFlags);
             ver.sdkVersion = mSdkVersion;
 
             // Remove any stale app permissions (declared permission that now are undeclared
@@ -2443,7 +2447,7 @@ public class PackageManagerService extends IPackageManager.Stub {
             // If this is first boot after an OTA, and a normal boot, then
             // we need to clear code cache directories.
             if (mIsUpgrade && !onlyCore) {
-                Slog.i(TAG, "Build fingerprint changed; clearing code caches");
+                Slog.i(TAG, "Build fingerprint or displayversion changed; clearing code caches");
                 for (int i = 0; i < mSettings.mPackages.size(); i++) {
                     final PackageSetting ps = mSettings.mPackages.valueAt(i);
                     if (Objects.equals(StorageManager.UUID_PRIVATE_INTERNAL, ps.volumeUuid)) {
@@ -2451,6 +2455,7 @@ public class PackageManagerService extends IPackageManager.Stub {
                     }
                 }
                 ver.fingerprint = Build.FINGERPRINT;
+                ver.displayversion = Build.DISPLAY;
             }
 
             checkDefaultBrowser();
@@ -2876,26 +2881,38 @@ public class PackageManagerService extends IPackageManager.Stub {
 
     @Override
     public int getPackageUid(String packageName, int userId) {
+        return getPackageUidEtc(packageName, 0, userId);
+    }
+
+    @Override
+    public int getPackageUidEtc(String packageName, int flags, int userId) {
         if (!sUserManager.exists(userId)) return -1;
         enforceCrossUserPermission(Binder.getCallingUid(), userId, false, false, "get package uid");
 
         // reader
         synchronized (mPackages) {
-            PackageParser.Package p = mPackages.get(packageName);
-            if(p != null) {
+            final PackageParser.Package p = mPackages.get(packageName);
+            if (p != null) {
                 return UserHandle.getUid(userId, p.applicationInfo.uid);
             }
-            PackageSetting ps = mSettings.mPackages.get(packageName);
-            if((ps == null) || (ps.pkg == null) || (ps.pkg.applicationInfo == null)) {
-                return -1;
+            if ((flags & PackageManager.GET_UNINSTALLED_PACKAGES) != 0) {
+                final PackageSetting ps = mSettings.mPackages.get(packageName);
+                if (ps != null) {
+                    return UserHandle.getUid(userId, ps.appId);
+                }
             }
-            p = ps.pkg;
-            return p != null ? UserHandle.getUid(userId, p.applicationInfo.uid) : -1;
         }
+
+        return -1;
     }
 
     @Override
-    public int[] getPackageGids(String packageName, int userId) throws RemoteException {
+    public int[] getPackageGids(String packageName, int userId) {
+        return getPackageGidsEtc(packageName, 0, userId);
+    }
+
+    @Override
+    public int[] getPackageGidsEtc(String packageName, int flags, int userId) {
         if (!sUserManager.exists(userId)) {
             return null;
         }
@@ -2905,13 +2922,16 @@ public class PackageManagerService extends IPackageManager.Stub {
 
         // reader
         synchronized (mPackages) {
-            PackageParser.Package p = mPackages.get(packageName);
-            if (DEBUG_PACKAGE_INFO) {
-                Log.v(TAG, "getPackageGids" + packageName + ": " + p);
-            }
+            final PackageParser.Package p = mPackages.get(packageName);
             if (p != null) {
                 PackageSetting ps = (PackageSetting) p.mExtras;
                 return ps.getPermissionsState().computeGids(userId);
+            }
+            if ((flags & PackageManager.GET_UNINSTALLED_PACKAGES) != 0) {
+                final PackageSetting ps = mSettings.mPackages.get(packageName);
+                if (ps != null) {
+                    return ps.getPermissionsState().computeGids(userId);
+                }
             }
         }
 
@@ -3674,7 +3694,8 @@ public class PackageManagerService extends IPackageManager.Stub {
                             killUid(appId, userId, KILL_APP_REASON_GIDS_CHANGED);
                         }
                     });
-                } break;
+                }
+                break;
             }
 
             mOnPermissionChangeListeners.onPermissionsChanged(uid);
@@ -4945,18 +4966,13 @@ public class PackageManagerService extends IPackageManager.Stub {
             // First try to add the "always" resolution(s) for the current user, if any
             if (alwaysList.size() > 0) {
                 result.addAll(alwaysList);
-            // if there is an "always" for the parent user, add it.
-            } else if (xpDomainInfo != null && xpDomainInfo.bestDomainVerificationStatus
-                    == INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_ALWAYS) {
-                result.add(xpDomainInfo.resolveInfo);
             } else {
                 // Add all undefined apps as we want them to appear in the disambiguation dialog.
                 result.addAll(undefinedList);
+                // Maybe add one for the other profile.
                 if (xpDomainInfo != null && (
                         xpDomainInfo.bestDomainVerificationStatus
-                        == INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_UNDEFINED
-                        || xpDomainInfo.bestDomainVerificationStatus
-                        == INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_ASK)) {
+                        != INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_NEVER)) {
                     result.add(xpDomainInfo.resolveInfo);
                 }
                 includeBrowser = true;
@@ -6320,41 +6336,6 @@ public class PackageManagerService extends IPackageManager.Stub {
                 if (pkgNames.contains(pkg.packageName)) {
                     if (DEBUG_DEXOPT) {
                         Log.i(TAG, "Adding pre boot system app " + sortedPkgs.size() + ": " + pkg.packageName);
-                    }
-                    sortedPkgs.add(pkg);
-                    it.remove();
-                }
-            }
-            // Give priority to system apps.
-            for (Iterator<PackageParser.Package> it = pkgs.iterator(); it.hasNext();) {
-                PackageParser.Package pkg = it.next();
-                if (isSystemApp(pkg) && !pkg.isUpdatedSystemApp()) {
-                    if (DEBUG_DEXOPT) {
-                        Log.i(TAG, "Adding system app " + sortedPkgs.size() + ": " + pkg.packageName);
-                    }
-                    sortedPkgs.add(pkg);
-                    it.remove();
-                }
-            }
-            // Give priority to updated system apps.
-            for (Iterator<PackageParser.Package> it = pkgs.iterator(); it.hasNext();) {
-                PackageParser.Package pkg = it.next();
-                if (pkg.isUpdatedSystemApp()) {
-                    if (DEBUG_DEXOPT) {
-                        Log.i(TAG, "Adding updated system app " + sortedPkgs.size() + ": " + pkg.packageName);
-                    }
-                    sortedPkgs.add(pkg);
-                    it.remove();
-                }
-            }
-            // Give priority to apps that listen for boot complete.
-            intent = new Intent(Intent.ACTION_BOOT_COMPLETED);
-            pkgNames = getPackageNamesForIntent(intent);
-            for (Iterator<PackageParser.Package> it = pkgs.iterator(); it.hasNext();) {
-                PackageParser.Package pkg = it.next();
-                if (pkgNames.contains(pkg.packageName)) {
-                    if (DEBUG_DEXOPT) {
-                        Log.i(TAG, "Adding boot app " + sortedPkgs.size() + ": " + pkg.packageName);
                     }
                     sortedPkgs.add(pkg);
                     it.remove();
@@ -7835,8 +7816,9 @@ public class PackageManagerService extends IPackageManager.Stub {
                             // Do not stop a pkg installation just because of one bad theme
                             // Also we don't break here because we should try to compile other
                             // themes
-                            Log.e(TAG, "Unable to compile " + themePkg.packageName
+                            Slog.w(TAG, "Unable to compile " + themePkg.packageName
                                     + " for target " + pkg.packageName, e);
+                            themePkg.mOverlayTargets.remove(pkg.packageName);
                         }
                     }
                 }
@@ -7849,9 +7831,10 @@ public class PackageManagerService extends IPackageManager.Stub {
             }
 
             // Generate Idmaps and res tables if pkg is a theme
-            for(String target : pkg.mOverlayTargets) {
+            Iterator<String> iterator = pkg.mOverlayTargets.iterator();
+            while(iterator.hasNext()) {
+                String target = iterator.next();
                 Exception failedException = null;
-                int failReason = 0;
 
                 insertIntoOverlayMap(target, pkg);
                 if (isBootScan && mBootThemeConfig != null &&
@@ -7862,21 +7845,17 @@ public class PackageManagerService extends IPackageManager.Stub {
                         compileResourcesAndIdmapIfNeeded(mPackages.get(target), pkg);
                     } catch (IdmapException e) {
                         failedException = e;
-                        failReason = PackageManager.INSTALL_FAILED_THEME_IDMAP_ERROR;
                     } catch (AaptException e) {
                         failedException = e;
-                        failReason = PackageManager.INSTALL_FAILED_THEME_AAPT_ERROR;
                     } catch (Exception e) {
                         failedException = e;
-                        failReason = PackageManager.INSTALL_FAILED_THEME_UNKNOWN_ERROR;
                     }
 
                     if (failedException != null) {
-                        Log.w(TAG, "Unable to process theme " + pkgName, failedException);
-                        uninstallThemeForAllApps(pkg);
-                        deletePackageLI(pkg.packageName, null, true, null, null, 0, null, false);
-                        throw new PackageManagerException(failReason,
-                                "Unable to process theme " + pkgName, failedException);
+                        Slog.w(TAG, "Unable to process theme " + pkgName + " for " + target,
+                                failedException);
+                        // remove target from mOverlayTargets
+                        iterator.remove();
                     }
                 }
             }
@@ -7926,8 +7905,8 @@ public class PackageManagerService extends IPackageManager.Stub {
         // We would never need to extract libs for forward-locked and external packages,
         // since the container service will do it for us. We shouldn't attempt to
         // extract libs from system app when it was not updated.
-        if (pkg.isForwardLocked() || isExternal(pkg) ||
-            (isSystemApp(pkg) && !pkg.isUpdatedSystemApp()) ) {
+        if (pkg.isForwardLocked() || pkg.applicationInfo.isExternalAsec() ||
+                (isSystemApp(pkg) && !pkg.isUpdatedSystemApp())) {
             extractLibs = false;
         }
 
@@ -8164,9 +8143,7 @@ public class PackageManagerService extends IPackageManager.Stub {
     }
 
     private void compileResourcesAndIdmapIfNeeded(PackageParser.Package targetPkg,
-                                               PackageParser.Package themePkg)
-            throws IdmapException, AaptException, IOException, Exception
-    {
+            PackageParser.Package themePkg) throws IdmapException, AaptException, IOException {
         if (!shouldCreateIdmap(targetPkg, themePkg)) {
             return;
         }
@@ -8184,7 +8161,7 @@ public class PackageManagerService extends IPackageManager.Stub {
     }
 
     private void compileResourcesIfNeeded(String target, PackageParser.Package pkg)
-        throws AaptException, IOException, Exception
+        throws AaptException, IOException
     {
         ThemeUtils.createCacheDirIfNotExists();
 
@@ -8199,7 +8176,8 @@ public class PackageManagerService extends IPackageManager.Stub {
         compileResources(target, pkg);
     }
 
-    private void compileResources(String target, PackageParser.Package pkg) throws Exception {
+    private void compileResources(String target, PackageParser.Package pkg)
+            throws IOException, AaptException {
         if (DEBUG_PACKAGE_SCANNING) Log.d(TAG, "  Compile resource table for " + pkg.packageName);
         //TODO: cleanup this hack. Modify aapt? Aapt uses the manifests package name
         //when creating the resource table. We care about the resource table's name because
@@ -8261,7 +8239,7 @@ public class PackageManagerService extends IPackageManager.Stub {
         }
     }
 
-    private boolean hasCommonResources(PackageParser.Package pkg) throws Exception {
+    private boolean hasCommonResources(PackageParser.Package pkg) throws IOException {
         boolean ret = false;
         // check if assets/overlays/common exists in this theme
         AssetManager assets = new AssetManager();
@@ -8273,7 +8251,7 @@ public class PackageManagerService extends IPackageManager.Stub {
     }
 
     private void compileResourcesWithAapt(String target, PackageParser.Package pkg)
-            throws Exception {
+            throws IOException, AaptException {
         String internalPath = APK_PATH_TO_OVERLAY + target + File.separator;
         String resPath = ThemeUtils.getTargetCacheDir(target, pkg);
         final int sharedGid = UserHandle.getSharedAppGid(pkg.applicationInfo.uid);
@@ -8341,7 +8319,7 @@ public class PackageManagerService extends IPackageManager.Stub {
         f.delete();
     }
 
-    private void createTempManifest(String pkgName) throws Exception {
+    private void createTempManifest(String pkgName) throws IOException {
         StringBuilder manifest = new StringBuilder();
         manifest.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
         manifest.append("<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"");
@@ -8503,7 +8481,7 @@ public class PackageManagerService extends IPackageManager.Stub {
         final String codePath = pkg.codePath;
         final File codeFile = new File(codePath);
         final boolean bundledApp = info.isSystemApp() && !info.isUpdatedSystemApp();
-        final boolean asecApp = info.isForwardLocked() || isExternal(info);
+        final boolean asecApp = info.isForwardLocked() || info.isExternalAsec();
 
         info.nativeLibraryRootDir = null;
         info.nativeLibraryRootRequiresIsa = false;
@@ -8908,8 +8886,14 @@ public class PackageManagerService extends IPackageManager.Stub {
     static final int UPDATE_PERMISSIONS_REPLACE_PKG = 1<<1;
     static final int UPDATE_PERMISSIONS_REPLACE_ALL = 1<<2;
 
+    private void updatePermissionsLPw(String changingPkg, PackageParser.Package pkgInfo,
+            int flags) {
+        final String volumeUuid = (pkgInfo != null) ? getVolumeUuidForPackage(pkgInfo) : null;
+        updatePermissionsLPw(changingPkg, pkgInfo, volumeUuid, flags);
+    }
+
     private void updatePermissionsLPw(String changingPkg,
-            PackageParser.Package pkgInfo, int flags) {
+            PackageParser.Package pkgInfo, String replaceVolumeUuid, int flags) {
         // Make sure there are no dangling permission trees.
         Iterator<BasePermission> it = mSettings.mPermissionTrees.values().iterator();
         while (it.hasNext()) {
@@ -8978,14 +8962,21 @@ public class PackageManagerService extends IPackageManager.Stub {
         if ((flags&UPDATE_PERMISSIONS_ALL) != 0) {
             for (PackageParser.Package pkg : mPackages.values()) {
                 if (pkg != pkgInfo) {
-                    grantPermissionsLPw(pkg, (flags&UPDATE_PERMISSIONS_REPLACE_ALL) != 0,
-                            changingPkg);
+                    // Only replace for packages on requested volume
+                    final String volumeUuid = getVolumeUuidForPackage(pkg);
+                    final boolean replace = ((flags & UPDATE_PERMISSIONS_REPLACE_ALL) != 0)
+                            && Objects.equals(replaceVolumeUuid, volumeUuid);
+                    grantPermissionsLPw(pkg, replace, changingPkg);
                 }
             }
         }
 
         if (pkgInfo != null) {
-            grantPermissionsLPw(pkgInfo, (flags&UPDATE_PERMISSIONS_REPLACE_PKG) != 0, changingPkg);
+            // Only replace for packages on requested volume
+            final String volumeUuid = getVolumeUuidForPackage(pkgInfo);
+            final boolean replace = ((flags & UPDATE_PERMISSIONS_REPLACE_PKG) != 0)
+                    && Objects.equals(replaceVolumeUuid, volumeUuid);
+            grantPermissionsLPw(pkgInfo, replace, changingPkg);
         }
     }
 
@@ -9012,6 +9003,7 @@ public class PackageManagerService extends IPackageManager.Stub {
 
         final int[] currentUserIds = UserManagerService.getInstance().getUserIds();
 
+        boolean runtimePermissionsRevoked = false;
         int[] changedRuntimePermissionUserIds = EMPTY_INT_ARRAY;
 
         boolean changedInstallPermission = false;
@@ -9021,6 +9013,17 @@ public class PackageManagerService extends IPackageManager.Stub {
             if (!ps.isSharedUser()) {
                 origPermissions = new PermissionsState(permissionsState);
                 permissionsState.reset();
+            } else {
+                // We need to know only about runtime permission changes since the
+                // calling code always writes the install permissions state but
+                // the runtime ones are written only if changed. The only cases of
+                // changed runtime permissions here are promotion of an install to
+                // runtime and revocation of a runtime from a shared user.
+                changedRuntimePermissionUserIds = revokeUnusedSharedUserPermissionsLPw(
+                        ps.sharedUser, UserManagerService.getInstance().getUserIds());
+                if (!ArrayUtils.isEmpty(changedRuntimePermissionUserIds)) {
+                    runtimePermissionsRevoked = true;
+                }
             }
         }
 
@@ -9236,9 +9239,11 @@ public class PackageManagerService extends IPackageManager.Stub {
             ps.installPermissionsFixed = true;
         }
 
-        // Persist the runtime permissions state for users with changes.
+        // Persist the runtime permissions state for users with changes. If permissions
+        // were revoked because no app in the shared user declares them we have to
+        // write synchronously to avoid losing runtime permissions state.
         for (int userId : changedRuntimePermissionUserIds) {
-            mSettings.writeRuntimePermissionsForUserLPr(userId, false);
+            mSettings.writeRuntimePermissionsForUserLPr(userId, runtimePermissionsRevoked);
         }
     }
 
@@ -12763,6 +12768,66 @@ public class PackageManagerService extends IPackageManager.Stub {
         }
     }
 
+    private int[] revokeUnusedSharedUserPermissionsLPw(SharedUserSetting su, int[] allUserIds) {
+        // Collect all used permissions in the UID
+        ArraySet<String> usedPermissions = new ArraySet<>();
+        final int packageCount = su.packages.size();
+        for (int i = 0; i < packageCount; i++) {
+            PackageSetting ps = su.packages.valueAt(i);
+            if (ps.pkg == null) {
+                continue;
+            }
+            final int requestedPermCount = ps.pkg.requestedPermissions.size();
+            for (int j = 0; j < requestedPermCount; j++) {
+                String permission = ps.pkg.requestedPermissions.get(j);
+                BasePermission bp = mSettings.mPermissions.get(permission);
+                if (bp != null) {
+                    usedPermissions.add(permission);
+                }
+            }
+        }
+
+        PermissionsState permissionsState = su.getPermissionsState();
+        // Prune install permissions
+        List<PermissionState> installPermStates = permissionsState.getInstallPermissionStates();
+        final int installPermCount = installPermStates.size();
+        for (int i = installPermCount - 1; i >= 0;  i--) {
+            PermissionState permissionState = installPermStates.get(i);
+            if (!usedPermissions.contains(permissionState.getName())) {
+                BasePermission bp = mSettings.mPermissions.get(permissionState.getName());
+                if (bp != null) {
+                    permissionsState.revokeInstallPermission(bp);
+                    permissionsState.updatePermissionFlags(bp, UserHandle.USER_ALL,
+                            PackageManager.MASK_PERMISSION_FLAGS, 0);
+                }
+            }
+        }
+
+        int[] runtimePermissionChangedUserIds = EmptyArray.INT;
+
+        // Prune runtime permissions
+        for (int userId : allUserIds) {
+            List<PermissionState> runtimePermStates = permissionsState
+                    .getRuntimePermissionStates(userId);
+            final int runtimePermCount = runtimePermStates.size();
+            for (int i = runtimePermCount - 1; i >= 0; i--) {
+                PermissionState permissionState = runtimePermStates.get(i);
+                if (!usedPermissions.contains(permissionState.getName())) {
+                    BasePermission bp = mSettings.mPermissions.get(permissionState.getName());
+                    if (bp != null) {
+                        permissionsState.revokeRuntimePermission(bp, userId);
+                        permissionsState.updatePermissionFlags(bp, userId,
+                                PackageManager.MASK_PERMISSION_FLAGS, 0);
+                        runtimePermissionChangedUserIds = ArrayUtils.appendInt(
+                                runtimePermissionChangedUserIds, userId);
+                    }
+                }
+            }
+        }
+
+        return runtimePermissionChangedUserIds;
+    }
+
     private void updateSettingsLI(PackageParser.Package newPackage, String installerPackageName,
             String volumeUuid, int[] allUsers, boolean[] perUserInstalled, PackageInstalledInfo res,
             UserHandle user) {
@@ -13258,6 +13323,18 @@ public class PackageManagerService extends IPackageManager.Stub {
             installFlags |= PackageManager.INSTALL_FORWARD_LOCK;
         }
         return installFlags;
+    }
+
+    private String getVolumeUuidForPackage(PackageParser.Package pkg) {
+        if (isExternal(pkg)) {
+            if (TextUtils.isEmpty(pkg.volumeUuid)) {
+                return StorageManager.UUID_PRIMARY_PHYSICAL;
+            } else {
+                return pkg.volumeUuid;
+            }
+        } else {
+            return StorageManager.UUID_PRIVATE_INTERNAL;
+        }
     }
 
     private VersionInfo getSettingsVersionForPackage(PackageParser.Package pkg) {
@@ -14302,7 +14379,7 @@ public class PackageManagerService extends IPackageManager.Stub {
             if (ps != null) {
                 libDirRoot = ps.legacyNativeLibraryPathString;
             }
-            if (p != null && (isExternal(p) || p.isForwardLocked())) {
+            if (p != null && (p.isForwardLocked() || p.applicationInfo.isExternalAsec())) {
                 final long token = Binder.clearCallingIdentity();
                 try {
                     String secureContainerId = cidFromCodePath(p.applicationInfo.getBaseCodePath());
@@ -16163,7 +16240,7 @@ public class PackageManagerService extends IPackageManager.Stub {
         if (isMounted) {
             if (DEBUG_SD_INSTALL)
                 Log.i(TAG, "Loading packages");
-            loadMediaPackages(processCids, uidArr);
+            loadMediaPackages(processCids, uidArr, externalStorage);
             startCleaningPackages();
             mInstallerService.onSecureContainersAvailable();
         } else {
@@ -16218,7 +16295,8 @@ public class PackageManagerService extends IPackageManager.Stub {
      * the cid is added to list of removeCids. We currently don't delete stale
      * containers.
      */
-    private void loadMediaPackages(ArrayMap<AsecInstallArgs, String> processCids, int[] uidArr) {
+    private void loadMediaPackages(ArrayMap<AsecInstallArgs, String> processCids, int[] uidArr,
+            boolean externalStorage) {
         ArrayList<String> pkgList = new ArrayList<String>();
         Set<AsecInstallArgs> keys = processCids.keySet();
 
@@ -16290,7 +16368,10 @@ public class PackageManagerService extends IPackageManager.Stub {
             // cases get permissions that the user didn't initially explicitly
             // allow... it would be nice to have some better way to handle
             // this situation.
-            final VersionInfo ver = mSettings.getExternalVersion();
+            final VersionInfo ver = externalStorage ? mSettings.getExternalVersion()
+                    : mSettings.getInternalVersion();
+            final String volumeUuid = externalStorage ? StorageManager.UUID_PRIMARY_PHYSICAL
+                    : StorageManager.UUID_PRIVATE_INTERNAL;
 
             int updateFlags = UPDATE_PERMISSIONS_ALL;
             if (ver.sdkVersion != mSdkVersion) {
@@ -16298,7 +16379,7 @@ public class PackageManagerService extends IPackageManager.Stub {
                         + mSdkVersion + "; regranting permissions for external");
                 updateFlags |= UPDATE_PERMISSIONS_REPLACE_PKG | UPDATE_PERMISSIONS_REPLACE_ALL;
             }
-            updatePermissionsLPw(null, null, updateFlags);
+            updatePermissionsLPw(null, null, volumeUuid, updateFlags);
 
             // Yay, everything is now upgraded
             ver.forceCurrent();
@@ -16418,7 +16499,8 @@ public class PackageManagerService extends IPackageManager.Stub {
                     Slog.w(TAG, "Failed to scan " + ps.codePath + ": " + e.getMessage());
                 }
 
-                if (!Build.FINGERPRINT.equals(ver.fingerprint)) {
+                if ((!Build.FINGERPRINT.equals(ver.fingerprint)) ||
+                        (!Build.DISPLAY.equals(ver.displayversion))) {
                     deleteCodeCacheDirsLI(ps.volumeUuid, ps.name);
                 }
             }
@@ -16431,7 +16513,7 @@ public class PackageManagerService extends IPackageManager.Stub {
                         + mSdkVersion + "; regranting permissions for " + vol.fsUuid);
                 updateFlags |= UPDATE_PERMISSIONS_REPLACE_PKG | UPDATE_PERMISSIONS_REPLACE_ALL;
             }
-            updatePermissionsLPw(null, null, updateFlags);
+            updatePermissionsLPw(null, null, vol.fsUuid, updateFlags);
 
             // Yay, everything is now upgraded
             ver.forceCurrent();
@@ -16605,13 +16687,18 @@ public class PackageManagerService extends IPackageManager.Stub {
         mContext.enforceCallingOrSelfPermission(android.Manifest.permission.MOVE_PACKAGE, null);
 
         final int moveId = mNextMoveId.getAndIncrement();
-        try {
-            movePackageInternal(packageName, volumeUuid, moveId);
-        } catch (PackageManagerException e) {
-            Slog.w(TAG, "Failed to move " + packageName, e);
-            mMoveCallbacks.notifyStatusChanged(moveId,
-                    PackageManager.MOVE_FAILED_INTERNAL_ERROR);
-        }
+        mHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    movePackageInternal(packageName, volumeUuid, moveId);
+                } catch (PackageManagerException e) {
+                    Slog.w(TAG, "Failed to move " + packageName, e);
+                    mMoveCallbacks.notifyStatusChanged(moveId,
+                            PackageManager.MOVE_FAILED_INTERNAL_ERROR);
+                }
+            }
+        });
         return moveId;
     }
 
@@ -17565,29 +17652,26 @@ public class PackageManagerService extends IPackageManager.Stub {
             }
         }
 
-        int errorCode = 0;
         // Generate Idmaps and res tables if pkg is a theme
-        for(String target : pkg.mOverlayTargets) {
+        Iterator<String> iterator = pkg.mOverlayTargets.iterator();
+        while(iterator.hasNext()) {
+            String target = iterator.next();
             Exception failedException = null;
             try {
                 compileResourcesAndIdmapIfNeeded(mPackages.get(target), pkg);
             } catch (IdmapException e) {
                 failedException = e;
-                errorCode = PackageManager.INSTALL_FAILED_THEME_IDMAP_ERROR;
             } catch (AaptException e) {
                 failedException = e;
-                errorCode = PackageManager.INSTALL_FAILED_THEME_AAPT_ERROR;
             } catch (Exception e) {
                 failedException = e;
-                errorCode = PackageManager.INSTALL_FAILED_THEME_UNKNOWN_ERROR;
             }
 
             if (failedException != null) {
-                Log.e(TAG, "Unable to process theme, uninstalling " + pkg.packageName,
+                Slog.w(TAG, "Unable to process theme " + pkg.packageName + " for " + target,
                       failedException);
-                uninstallThemeForAllApps(pkg);
-                deletePackageX(themePkgName, getCallingUid(), PackageManager.DELETE_ALL_USERS);
-                return errorCode;
+                // remove target from mOverlayTargets
+                iterator.remove();
             }
         }
 

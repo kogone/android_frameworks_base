@@ -33,6 +33,7 @@ import com.android.systemui.qs.QSTile;
 import com.android.systemui.statusbar.policy.CastController;
 import com.android.systemui.statusbar.policy.CastController.CastDevice;
 import com.android.systemui.statusbar.policy.KeyguardMonitor;
+import cyanogenmod.app.StatusBarPanelCustomTile;
 
 import java.util.LinkedHashMap;
 import java.util.Set;
@@ -92,6 +93,11 @@ public class CastTile extends QSTile<QSTile.BooleanState> {
     }
 
     @Override
+    protected void handleSecondaryClick() {
+        handleClick();
+    }
+
+    @Override
     protected void handleLongClick() {
         mHost.startActivityDismissingKeyguard(CAST_SETTINGS);
     }
@@ -135,6 +141,11 @@ public class CastTile extends QSTile<QSTile.BooleanState> {
         return null;
     }
 
+    @Override
+    public boolean hasDualTargetsDetails() {
+        return true;
+    }
+
     private String getDeviceName(CastDevice device) {
         return device.name != null ? device.name
                 : mContext.getString(R.string.quick_settings_cast_device_default_name);
@@ -170,6 +181,11 @@ public class CastTile extends QSTile<QSTile.BooleanState> {
         @Override
         public Intent getSettingsIntent() {
             return CAST_SETTINGS;
+        }
+
+        @Override
+        public StatusBarPanelCustomTile getCustomTile() {
+            return null;
         }
 
         @Override

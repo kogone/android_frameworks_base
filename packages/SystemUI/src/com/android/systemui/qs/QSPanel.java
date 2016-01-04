@@ -47,11 +47,12 @@ import com.android.systemui.statusbar.policy.BrightnessMirrorController;
 import java.util.ArrayList;
 import java.util.Collection;
 
+import cyanogenmod.app.StatusBarPanelCustomTile;
 import cyanogenmod.providers.CMSettings;
 
 /** View that represents the quick settings tile panel. **/
 public class QSPanel extends ViewGroup {
-    private static final float TILE_ASPECT = 1.2f;
+    protected static final float TILE_ASPECT = 1.2f;
 
     protected final ArrayList<TileRecord> mRecords = new ArrayList<>();
     protected View mDetail;
@@ -93,6 +94,9 @@ public class QSPanel extends ViewGroup {
         setupViews();
     }
 
+    /**
+     * THIS IS OVERRIDDEN in QSDragPanel
+     */
     protected void setupViews() {
         mDetail = LayoutInflater.from(mContext).inflate(R.layout.qs_detail, this, false);
         mDetailContent = (ViewGroup) mDetail.findViewById(android.R.id.content);
@@ -127,7 +131,7 @@ public class QSPanel extends ViewGroup {
     /**
      * Enable/disable brightness slider.
      */
-    private boolean showBrightnessSlider() {
+    protected boolean showBrightnessSlider() {
         boolean brightnessSliderEnabled = CMSettings.System.getIntForUser(
             mContext.getContentResolver(), CMSettings.System.QS_SHOW_BRIGHTNESS_SLIDER,
                 1, UserHandle.USER_CURRENT) == 1;
@@ -390,7 +394,7 @@ public class QSPanel extends ViewGroup {
         }
     }
 
-    private void handleShowDetailTile(TileRecord r, boolean show) {
+    protected void handleShowDetailTile(TileRecord r, boolean show) {
         if ((mDetailRecord != null) == show && mDetailRecord == r) return;
 
         if (show) {
@@ -403,7 +407,7 @@ public class QSPanel extends ViewGroup {
         handleShowDetailImpl(r, show, x, y);
     }
 
-    private void handleShowDetailImpl(Record r, boolean show, int x, int y) {
+    protected void handleShowDetailImpl(Record r, boolean show, int x, int y) {
         boolean visibleDiff = (mDetailRecord != null) != show;
         if (!visibleDiff && mDetailRecord == r) return;  // already in right state
         DetailAdapter detailAdapter = null;
