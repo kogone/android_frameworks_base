@@ -68,6 +68,7 @@ import com.android.systemui.tuner.QsTuner;
 import com.viewpagerindicator.CirclePageIndicator;
 import cyanogenmod.app.StatusBarPanelCustomTile;
 import cyanogenmod.providers.CMSettings;
+import org.cyanogenmod.internal.logging.CMMetricsLogger;
 import org.cyanogenmod.internal.util.QSUtils;
 
 import java.util.ArrayList;
@@ -561,6 +562,7 @@ public class QSDragPanel extends QSPanel implements View.OnDragListener, View.On
                     record.destinationPage = tileDestPage;
                     recordMap.put(tile, record);
                     mRecords.add(i, record);
+                    mPagerAdapter.notifyDataSetChanged();
 
                     // add the view
                     mPages.get(record.destinationPage).addView(record.tileView);
@@ -1837,11 +1839,14 @@ public class QSDragPanel extends QSPanel implements View.OnDragListener, View.On
             title.setText(group);
 
             if (isExpanded) {
-                expansionIndicator.setColorFilter(0xFF80cbc4, PorterDuff.Mode.SRC_ATOP);
-                systemOrAppIcon.setColorFilter(0xFF80cbc4, PorterDuff.Mode.SRC_ATOP);
-                title.setTextColor(0xFF80cbc4);
+                expansionIndicator.setColorFilter(
+                        mContext.getColor(
+                    R.color.qs_detailed_expansion_indicator_color), PorterDuff.Mode.SRC_ATOP);
+                systemOrAppIcon.setColorFilter(
+                        mContext.getColor(R.color.qs_detailed_icon_tint_color), PorterDuff.Mode.SRC_ATOP);
+                title.setTextColor(mContext.getColor(R.color.qs_detailed_title_text_color));
             } else {
-                title.setTextColor(Color.WHITE);
+                title.setTextColor(mContext.getColor(R.color.qs_detailed_default_text_color));
                 systemOrAppIcon.setColorFilter(null);
                 expansionIndicator.setColorFilter(null);
             }
@@ -2003,7 +2008,7 @@ public class QSDragPanel extends QSPanel implements View.OnDragListener, View.On
 
         @Override
         public int getMetricsCategory() {
-            return MetricsLogger.DONT_TRACK_ME_BRO;
+            return CMMetricsLogger.DONT_LOG;
         }
 
         public void showBroadcastTileDialog() {
