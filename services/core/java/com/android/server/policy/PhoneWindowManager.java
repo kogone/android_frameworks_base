@@ -83,10 +83,11 @@ import android.service.dreams.DreamService;
 import android.service.dreams.IDreamManager;
 import android.speech.RecognizerIntent;
 import android.telecom.TelecomManager;
-import android.service.gesture.EdgeGestureManager;
 import com.android.internal.os.DeviceKeyHandler;
 
 import com.android.internal.util.cm.ActionUtils;
+
+import cyanogenmod.hardware.CMHardwareManager;
 import cyanogenmod.providers.CMSettings;
 import dalvik.system.DexClassLoader;
 import android.util.DisplayMetrics;
@@ -129,8 +130,6 @@ import com.android.internal.R;
 import com.android.internal.policy.IKeyguardService;
 import com.android.internal.statusbar.IStatusBarService;
 import com.android.internal.util.ScreenShapeHelper;
-import com.android.internal.util.gesture.EdgeGesturePosition;
-import com.android.internal.util.gesture.EdgeServiceConstants;
 import com.android.internal.view.RotationPolicy;
 import com.android.internal.widget.PointerLocationView;
 import com.android.server.GestureLauncherService;
@@ -306,6 +305,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     /** Amount of time (in milliseconds) to wait for windows drawn before powering on. */
     static final int WAITING_FOR_DRAWN_TIMEOUT = 1000;
+
+    private DeviceKeyHandler mDeviceKeyHandler;
 
     /**
      * Lock protecting internal state.  Must not call out into window
@@ -747,6 +748,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private boolean mHasPermanentMenuKey;
     private boolean mClearedBecauseOfForceShow;
     private boolean mTopWindowIsKeyguard;
+    private CMHardwareManager mCMHardware;
 
     private class PolicyHandler extends Handler {
         @Override
@@ -897,9 +899,6 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     CMSettings.System.VOLBTN_MUSIC_CONTROLS), false, this,
                     UserHandle.USER_ALL);
             resolver.registerContentObserver(CMSettings.System.getUriFor(
-                    CMSettings.System.USE_EDGE_SERVICE_FOR_GESTURES), false, this,
-                    UserHandle.USER_ALL);
-            resolver.registerContentObserver(CMSettings.System.getUriFor(
                     CMSettings.System.BACK_WAKE_SCREEN), false, this,
                     UserHandle.USER_ALL);
             resolver.registerContentObserver(CMSettings.System.getUriFor(
@@ -992,67 +991,6 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private ImmersiveModeConfirmation mImmersiveModeConfirmation;
 
     private SystemGesturesPointerEventListener mSystemGestures;
-
-    private EdgeGestureManager.EdgeGestureActivationListener mEdgeGestureActivationListener
-            = new EdgeGestureManager.EdgeGestureActivationListener() {
-
-        @Override
-        public void onEdgeGestureActivation(int touchX, int touchY,
-                EdgeGesturePosition position, int flags) {
-            WindowState target = null;
-
-            if (position == EdgeGesturePosition.TOP) {
-                target = mStatusBar;
-            } else if (position == EdgeGesturePosition.BOTTOM  && mNavigationBarOnBottom) {
-                target = mNavigationBar;
-            } else if (position == EdgeGesturePosition.LEFT
-                    && !mNavigationBarOnBottom && mNavigationBarLeftInLandscape) {
-                target = mNavigationBar;
-            } else if (position == EdgeGesturePosition.RIGHT && !mNavigationBarOnBottom) {
-                target = mNavigationBar;
-            }
-
-            if (target != null) {
-                requestTransientBars(target);
-                dropEventsUntilLift();
-                mEdgeListenerActivated = true;
-            } else {
-                restoreListenerState();
-            }
-        }
-    };
-    private EdgeGestureManager mEdgeGestureManager = null;
-    private int mLastEdgePositions = 0;
-    private boolean mEdgeListenerActivated = false;
-    private boolean mUsingEdgeGestureServiceForGestures = false;
-
-    private void updateEdgeGestureListenerState() {
-        int flags = 0;
-        if (mUsingEdgeGestureServiceForGestures) {
-            flags = EdgeServiceConstants.LONG_LIVING | EdgeServiceConstants.UNRESTRICTED;
-            if (mStatusBar != null && !mStatusBar.isVisibleLw()) {
-                flags |= EdgeGesturePosition.TOP.FLAG;
-            }
-            if (mNavigationBar != null && !mNavigationBar.isVisibleLw() && !isStatusBarKeyguard()) {
-                if (mNavigationBarOnBottom) {
-                    flags |= EdgeGesturePosition.BOTTOM.FLAG;
-                } else if (mNavigationBarLeftInLandscape) {
-                    flags |= EdgeGesturePosition.LEFT.FLAG;
-                } else {
-                    flags |= EdgeGesturePosition.RIGHT.FLAG;
-                }
-            }
-        }
-        if (mEdgeListenerActivated) {
-            mEdgeGestureActivationListener.restoreListenerState();
-            mEdgeListenerActivated = false;
-        }
-        if (flags != mLastEdgePositions) {
-            mEdgeGestureManager.updateEdgeGestureActivationListener(mEdgeGestureActivationListener,
-                    flags);
-            mLastEdgePositions = flags;
-        }
-    }
 
     IStatusBarService getStatusBarService() {
         synchronized (mServiceAquireLock) {
@@ -1632,6 +1570,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         mDreamManagerInternal = LocalServices.getService(DreamManagerInternal.class);
         mPowerManagerInternal = LocalServices.getService(PowerManagerInternal.class);
         mAppOpsManager = (AppOpsManager) mContext.getSystemService(Context.APP_OPS_SERVICE);
+        mPowerManagerInternal = LocalServices.getService(PowerManagerInternal.class);
 
         // Init display burn-in protection
         boolean burnInProtectionEnabled = context.getResources().getBoolean(
@@ -1675,7 +1614,6 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             mOrientationListener.setCurrentRotation(windowManager.getRotation());
         } catch (RemoteException ex) { }
         mSettingsObserver = new SettingsObserver(mHandler);
-        mSettingsObserver.observe();
         mShortcutManager = new ShortcutManager(context);
         mUiMode = context.getResources().getInteger(
                 com.android.internal.R.integer.config_defaultUiModeType);
@@ -1883,6 +1821,30 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         mWindowManagerInternal.registerAppTransitionListener(
                 mStatusBarController.getAppTransitionListener());
+
+        String deviceKeyHandlerLib = mContext.getResources().getString(
+                com.android.internal.R.string.config_deviceKeyHandlerLib);
+
+        String deviceKeyHandlerClass = mContext.getResources().getString(
+                com.android.internal.R.string.config_deviceKeyHandlerClass);
+
+        if (!deviceKeyHandlerLib.isEmpty() && !deviceKeyHandlerClass.isEmpty()) {
+            DexClassLoader loader =  new DexClassLoader(deviceKeyHandlerLib,
+                    new ContextWrapper(mContext).getCacheDir().getAbsolutePath(),
+                    null,
+                    ClassLoader.getSystemClassLoader());
+            try {
+                Class<?> klass = loader.loadClass(deviceKeyHandlerClass);
+                Constructor<?> constructor = klass.getConstructor(Context.class);
+                mDeviceKeyHandler = (DeviceKeyHandler) constructor.newInstance(
+                        mContext);
+                if(DEBUG) Slog.d(TAG, "Device key handler loaded");
+            } catch (Exception e) {
+                Slog.w(TAG, "Could not instantiate device key handler "
+                        + deviceKeyHandlerClass + " from class "
+                        + deviceKeyHandlerLib, e);
+            }
+        }
 
     }
 
@@ -2160,23 +2122,13 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 updateWakeGestureListenerLp();
             }
 
-            final boolean useEdgeService = CMSettings.System.getIntForUser(resolver,
-                    CMSettings.System.USE_EDGE_SERVICE_FOR_GESTURES, 0, UserHandle.USER_CURRENT) == 1;
-            if (useEdgeService ^ mUsingEdgeGestureServiceForGestures && mSystemReady) {
-                if (!mUsingEdgeGestureServiceForGestures && useEdgeService) {
-                    mUsingEdgeGestureServiceForGestures = true;
-                    mWindowManagerFuncs.unregisterPointerEventListener(mSystemGestures);
-                } else if (mUsingEdgeGestureServiceForGestures && !useEdgeService) {
-                    mUsingEdgeGestureServiceForGestures = false;
-                    mWindowManagerFuncs.registerPointerEventListener(mSystemGestures);
-                }
-                updateEdgeGestureListenerState();
-            }
-
             boolean devForceNavbar = CMSettings.Secure.getIntForUser(resolver,
                     CMSettings.Secure.DEV_FORCE_SHOW_NAVBAR, 0, UserHandle.USER_CURRENT) == 1;
             if (devForceNavbar != mDevForceNavbar) {
                 mDevForceNavbar = devForceNavbar;
+                if (mCMHardware.isSupported(CMHardwareManager.FEATURE_KEY_DISABLE)) {
+                    mCMHardware.set(CMHardwareManager.FEATURE_KEY_DISABLE, mDevForceNavbar);
+                }
             }
 
             mNavigationBarLeftInLandscape = CMSettings.System.getIntForUser(resolver,
@@ -3141,19 +3093,6 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     + " canceled=" + canceled);
         }
 
-        // If the boot mode is power off alarm, we should not dispatch the several physical keys
-        // in power off alarm UI to avoid pausing power off alarm UI.
-        int isPowerOffAlarmMode = Settings.System.getInt(mContext.getContentResolver(),
-                Settings.System.POWER_OFF_ALARM_MODE, 0);
-        if (DEBUG_INPUT) { Log.d(TAG, "intercept Dispatching isPowerOffAlarmMode = " +
-                isPowerOffAlarmMode); }
-
-        if (isPowerOffAlarmMode == 1 && (keyCode == KeyEvent.KEYCODE_HOME
-                || keyCode == KeyEvent.KEYCODE_SEARCH
-                || keyCode == KeyEvent.KEYCODE_MENU)) {
-            return -1;  // ignore the physical key here
-        }
-
         // If we think we might have a volume down & power key chord on the way
         // but we're not sure, then tell the dispatcher to wait a little while and
         // try again later before dispatching.
@@ -3613,11 +3552,15 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             return -1;
         }
 
-        GestureLauncherService gestureService = LocalServices.getService(
-                GestureLauncherService.class);
-        if (gestureService != null) {
-            if (gestureService.deviceKeyHandlerEvent(event)) {
-                return -1;
+        // Specific device key handling
+        if (mDeviceKeyHandler != null) {
+            try {
+                // The device only should consume known keys.
+                if (mDeviceKeyHandler.handleKeyEvent(event)) {
+                    return -1;
+                }
+            } catch (Exception e) {
+                Slog.w(TAG, "Could not dispatch event to device key handler", e);
             }
         }
 
@@ -4011,8 +3954,6 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         mStatusBarController.adjustSystemUiVisibilityLw(mLastSystemUiFlags, visibility);
         mNavigationBarController.adjustSystemUiVisibilityLw(mLastSystemUiFlags, visibility);
         mRecentsVisible = (visibility & View.RECENT_APPS_VISIBLE) > 0;
-
-        updateEdgeGestureListenerState();
 
         // Reset any bits in mForceClearingStatusBarVisibility that
         // are now clear.
@@ -5342,7 +5283,6 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         // update since mAllowLockscreenWhenOn might have changed
         updateLockScreenTimeout();
-        updateEdgeGestureListenerState();
         return changes;
     }
 
@@ -5631,7 +5571,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         if (isValidGlobalKey(keyCode)
                 && mGlobalKeyManager.shouldHandleGlobalKey(keyCode, event)) {
             if (isWakeKey) {
-                wakeUp(event.getEventTime(), mAllowTheaterModeWakeFromKey, "android.policy:KEY");
+                wakeUp(event.getEventTime(), mAllowTheaterModeWakeFromKey,
+                       "android.policy:KEY", true);
             }
             return result;
         }
@@ -5640,12 +5581,15 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 && (policyFlags & WindowManagerPolicy.FLAG_VIRTUAL) != 0
                 && event.getRepeatCount() == 0;
 
-
-        GestureLauncherService gestureService = LocalServices.getService(
-                GestureLauncherService.class);
-        if (gestureService != null) {
-            if (gestureService.deviceKeyHandlerEvent(event)) {
-                return 0;
+        // Specific device key handling
+        if (mDeviceKeyHandler != null) {
+            try {
+                // The device only should consume known keys.
+                if (mDeviceKeyHandler.handleKeyEvent(event)) {
+                    return 0;
+                }
+            } catch (Exception e) {
+                Slog.w(TAG, "Could not dispatch event to device key handler", e);
             }
         }
 
@@ -5891,6 +5835,15 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 break;
             }
 
+            case KeyEvent.KEYCODE_SOFT_SLEEP: {
+                result &= ~ACTION_PASS_TO_USER;
+                isWakeKey = false;
+                if (!down) {
+                    mPowerManagerInternal.setUserInactiveOverrideFromWindowManager();
+                }
+                break;
+            }
+
             case KeyEvent.KEYCODE_WAKEUP: {
                 result &= ~ACTION_PASS_TO_USER;
                 isWakeKey = true;
@@ -5966,7 +5919,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         }
 
         if (isWakeKey) {
-            wakeUp(event.getEventTime(), mAllowTheaterModeWakeFromKey, "android.policy:KEY");
+            wakeUp(event.getEventTime(), mAllowTheaterModeWakeFromKey, "android.policy:KEY", true);
         }
 
         return result;
@@ -6103,11 +6056,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     }
 
     private boolean shouldDispatchInputWhenNonInteractive() {
-        if (mDisplay == null || mDisplay.getState() == Display.STATE_OFF) {
-            return false;
-        }
-        // Send events to keyguard while the screen is on and it's showing.
-        if (isKeyguardShowingAndNotOccluded()) {
+        // Send events to keyguard while the screen is on.
+        if (isKeyguardShowingAndNotOccluded() && mDisplay != null
+                && mDisplay.getState() != Display.STATE_OFF) {
             return true;
         }
 
@@ -6406,10 +6357,15 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     }
 
     private void wakeUpFromPowerKey(long eventTime) {
-        wakeUp(eventTime, mAllowTheaterModeWakeFromPowerKey, "android.policy:POWER");
+        wakeUp(eventTime, mAllowTheaterModeWakeFromPowerKey, "android.policy:POWER", true);
     }
 
     private boolean wakeUp(long wakeTime, boolean wakeInTheaterMode, String reason) {
+        return wakeUp(wakeTime, wakeInTheaterMode, reason, false);
+    }
+
+    private boolean wakeUp(long wakeTime, boolean wakeInTheaterMode, String reason,
+            boolean withProximityCheck) {
         final boolean theaterModeEnabled = isTheaterModeEnabled();
         if (!wakeInTheaterMode && theaterModeEnabled) {
             return false;
@@ -6420,7 +6376,11 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     Settings.Global.THEATER_MODE_ON, 0);
         }
 
-        mPowerManager.wakeUp(wakeTime, reason);
+        if (withProximityCheck) {
+            mPowerManager.wakeUpWithProximityCheck(wakeTime, reason);
+        } else {
+            mPowerManager.wakeUp(wakeTime, reason);
+        }
         return true;
     }
 
@@ -6935,8 +6895,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         mKeyguardDelegate = new KeyguardServiceDelegate(mContext);
         mKeyguardDelegate.onSystemReady();
 
-        mEdgeGestureManager = EdgeGestureManager.getInstance();
-        mEdgeGestureManager.setEdgeGestureActivationListener(mEdgeGestureActivationListener);
+        mCMHardware = CMHardwareManager.getInstance(mContext);
+        // Ensure observe happens in systemReady() since we need
+        // CMHardwareService to be up and running
+        mSettingsObserver.observe();
 
         readCameraLensCoverState();
         updateUiMode();
