@@ -4712,9 +4712,14 @@ public class PackageManagerService extends IPackageManager.Stub {
     }
 
     private boolean shouldIncludeResolveActivity(Intent intent) {
+        // Don't call into AppSuggestManager before it comes up later in the SystemServer init!
+        if (!mSystemReady) {
+            return false;
+        }
         synchronized(mPackages) {
             AppSuggestManager suggest = AppSuggestManager.getInstance(mContext);
-            return mResolverReplaced && (suggest != null) ? suggest.handles(intent) : false;
+            return mResolverReplaced && (suggest.getService() != null) ?
+                    suggest.handles(intent) : false;
         }
     }
 
@@ -5849,12 +5854,15 @@ public class PackageManagerService extends IPackageManager.Stub {
                     }
                     synchronized (mPackages) {
                         if (DEBUG_PREBUNDLED_SCAN) Log.d(TAG,
-                                "Marking prebundled packages for user " + prebundledUserId);
+                                "Marking prebundled package " + pkg.packageName +
+                                        " for user " + prebundledUserId);
                         mSettings.markPrebundledPackageInstalledLPr(prebundledUserId,
                                 pkg.packageName);
                         // do this for every other user
                         for (UserInfo userInfo : sUserManager.getUsers(true)) {
                             if (userInfo.id == prebundledUserId) continue;
+                            if (DEBUG_PREBUNDLED_SCAN) Log.d(TAG,
+                                    "Marking for secondary user " + userInfo.id);
                             mSettings.markPrebundledPackageInstalledLPr(userInfo.id,
                                     pkg.packageName);
                         }
@@ -5986,14 +5994,15 @@ public class PackageManagerService extends IPackageManager.Stub {
         if ((parseFlags & PackageParser.PARSE_IS_PREBUNDLED_DIR) != 0) {
             synchronized (mPackages) {
                 PackageSetting existingSettings = mSettings.peekPackageLPr(pkg.packageName);
-                if (mSettings.wasPrebundledPackageInstalledLPr(user.getIdentifier()
-                        , pkg.packageName) && existingSettings == null) {
-                    // The prebundled app was installed at some point in time, but now it is
-                    // gone.  Assume that the user uninstalled it intentionally: do not reinstall.
+                boolean isInstalledForUser = (existingSettings != null
+                        && existingSettings.getInstalled(user.getIdentifier()));
+                if (mSettings.wasPrebundledPackageInstalledLPr(user.getIdentifier(),
+                        pkg.packageName) && !isInstalledForUser) {
+                    // The prebundled app was installed at some point for the user and isn't
+                    // currently installed for the user, skip reinstalling it
                     throw new PackageManagerException(INSTALL_FAILED_UNINSTALLED_PREBUNDLE,
                             "skip reinstall for " + pkg.packageName);
-                } else if (existingSettings == null &&
-                        !mSettings.shouldPrebundledPackageBeInstalled(mContext.getResources(),
+                } else if (!mSettings.shouldPrebundledPackageBeInstalled(mContext.getResources(),
                                 pkg.packageName, mCustomResources)) {
                     // The prebundled app is not needed for the default mobile country code,
                     // skip installing it
@@ -10225,10 +10234,10 @@ public class PackageManagerService extends IPackageManager.Stub {
 
     void startCleaningPackages() {
         // reader
+        if (!isExternalMediaAvailable()) {
+            return;
+        }
         synchronized (mPackages) {
-            if (!isExternalMediaAvailable()) {
-                return;
-            }
             if (mSettings.mPackagesToBeCleaned.isEmpty()) {
                 return;
             }
@@ -17290,14 +17299,8 @@ public class PackageManagerService extends IPackageManager.Stub {
         synchronized (mPackages) {
             pkgSetting = mSettings.mPackages.get(packageName);
 
-            if (pkgSetting == null) {
-                if (className == null) {
-                    throw new IllegalArgumentException(
-                            "Unknown package: " + packageName);
-                }
-                throw new IllegalArgumentException(
-                        "Unknown component: " + packageName
-                                + "/" + className);
+            if (pkgSetting == null || className == null) {
+                return false;
             }
             // Get all the protected components
             components = pkgSetting.getProtectedComponents(userId);
@@ -17872,6 +17875,8 @@ public class PackageManagerService extends IPackageManager.Stub {
         for (String themePkgName : themesToProcess) {
             processThemeResources(themePkgName);
         }
+
+        updateIconMapping(themeConfig.getIconPackPkgName());
     }
 
     private void createAndSetCustomResources() {
